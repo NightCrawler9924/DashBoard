@@ -27,10 +27,10 @@ buzzer = Buzzer(24)
 relay = OutputDevice(23, active_high=True, initial_value=False)
 
 SETPOINT = 60.0
+OVERHEAT_DELAY = 10.0
 
 # Persistent state
 overheat_start_time = None
-last_temp = None
 failure_latched = False
 
 
@@ -72,7 +72,7 @@ def root():
 
 @app.get("/state")
 def get_state():
-    global overheat_start_time, last_temp, failure_latched
+    global overheat_start_time, failure_latched
 
     temp = read_temp()
     now = time.time()
@@ -80,27 +80,26 @@ def get_state():
     if failure_latched:
         apply_failure_state()
 
+    elif temp > SETPOINT:
+        apply_cooling_state()
+
+        # Start timer as soon as temperature goes above 60
+        if overheat_start_time is None:
+            overheat_start_time = now
+
+        # If temperature stays above 60 for 10 seconds, trigger failure
+        elif now - overheat_start_time >= OVERHEAT_DELAY:
+            failure_latched = True
+            apply_failure_state()
+
     else:
-        if temp > SETPOINT:
-            apply_cooling_state()
+        # Safe region
+        overheat_start_time = None
+        apply_safe_state()
 
-            # Start / continue rising timer only if still rising
-            if last_temp is not None and temp > last_temp:
-                if overheat_start_time is None:
-                    overheat_start_time = now
-                elif now - overheat_start_time >= 10:
-                    failure_latched = True
-                    apply_failure_state()
-            else:
-                # Temp stopped rising or began falling
-                overheat_start_time = None
-
-        else:
-            # Safe region
-            overheat_start_time = None
-            apply_safe_state()
-
-    last_temp = temp
+    time_above_setpoint = 0.0
+    if overheat_start_time is not None and not failure_latched and temp > SETPOINT:
+        time_above_setpoint = round(now - overheat_start_time, 2)
 
     return {
         "current_temperature": temp,
@@ -116,16 +115,16 @@ def get_state():
         "led_fault": red_led.is_lit,
         "led_ok": green_led.is_lit,
         "failure_mode": "CRITICAL_OVERHEAT" if failure_latched else "NONE",
-        "screen_of_death": failure_latched
+        "screen_of_death": failure_latched,
+        "time_above_setpoint": time_above_setpoint
     }
 
 
 @app.post("/reset")
 def reset_trip():
-    global overheat_start_time, last_temp, failure_latched
+    global overheat_start_time, failure_latched
 
     overheat_start_time = None
-    last_temp = None
     failure_latched = False
     apply_safe_state()
 
