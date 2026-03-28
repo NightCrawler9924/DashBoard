@@ -7,7 +7,6 @@ const MAX_LOGS = 220;
 const POLL_MS = 900;
 
 const baseState: PlantState = {
-  current_temperature: 24.5,
   setpoint: 60,
   mode: "OFF",
   trip_status: false,

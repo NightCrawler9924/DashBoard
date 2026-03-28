@@ -1,6 +1,21 @@
 import json
 import os
 from typing import Any, Dict
+import glob
+from gpiozero import LED, Buzzer
+
+green_led = LED(17)
+blue_led = LED(27)
+red_led = LED(22)
+relay = LED(23)
+buzzer = Buzzer(24)
+
+def read_temp():
+	device = glob.glob('/sys/bus/w1/devices/28*')[0]
+	with open(device + '/w1_slave') as f:
+		lines = f.readlines()
+	temp = float(lines[1].split('t=')[1])/1000
+	return temp
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +38,38 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {"message": "Thermal Control Backend Running"}
+
+@app.get("/state")
+def get_state():
+    temp = read_temp()
+
+    if temp > 60:
+        red_led.on()
+        buzzer.on()
+        relay.off()
+        green_led.off()
+        blue_led.off()
+    else:
+        red_led.off()
+        buzzer.off()
+        green_led.on()
+        blue_led.off()
+
+    return {
+        "current_temperature": temp,
+        "setpoint": 60,
+        "mode": "OFF",
+        "trip_status": red_led.is_lit,
+        "heater_on": False,
+        "pump_on": True,
+        "relay_on": relay.is_lit,
+        "buzzer_on": buzzer.is_active,
+        "led_heating": blue_led.is_lit,
+        "led_holding": False,
+        "led_fault": red_led.is_lit,
+        "led_ok": green_led.is_lit,
+        "failure_mode": "CRITICAL" if red_led.is_lit else "NONE"
+    }
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:

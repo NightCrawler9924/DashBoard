@@ -1,6 +1,6 @@
 import type { PlantMode, PlantState } from "../types";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "http://10.43.101.91:8000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
