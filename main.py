@@ -26,8 +26,8 @@ buzzer = Buzzer(24)
 relay = OutputDevice(23, active_high=True, initial_value=False)
 
 # Thresholds
-COOLING_HIGH = 60.0
-NORMAL_LOW = 58.0
+COOLING_HIGH = 30.0
+NORMAL_LOW = 28.0
 OVERHEAT_DELAY = 20.0
 
 # Persistent state: timer only
