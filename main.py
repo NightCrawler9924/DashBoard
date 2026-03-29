@@ -30,7 +30,7 @@ ADVISORY_LOW = 55.0
 COOLING_HIGH = 60.0
 RECOVERY_LOW = 58.0
 EMERGENCY_TRIP = 75.0
-OVERHEAT_DELAY = 10.0
+OVERHEAT_DELAY = 20.0
 
 # Persistent state
 overheat_start_time = None
