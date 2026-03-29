@@ -22,22 +22,20 @@ blue_led = LED(27)
 red_led = LED(22)
 buzzer = Buzzer(24)
 
-# If relay behaves inverted, change active_high to False
+# If relay behaves backwards, change active_high to False
 relay = OutputDevice(23, active_high=True, initial_value=False)
 
 # Thresholds
-ADVISORY_LOW = 55.0
 COOLING_HIGH = 60.0
-RECOVERY_LOW = 58.0
-EMERGENCY_TRIP = 75.0
+NORMAL_LOW = 58.0
 OVERHEAT_DELAY = 20.0
 
-# Persistent state
+# Persistent state: timer only
 overheat_start_time = None
-failure_latched = False
-failure_reason = "NONE"
+sensor_fault_count = 0
+SENSOR_FAULT_LIMIT = 3
 
-# Internal history buffer, backend only, no frontend change required
+# Internal history
 temperature_history = deque(maxlen=300)
 
 
@@ -46,26 +44,21 @@ def read_temp() -> float:
     if not matches:
         raise RuntimeError("DS18B20 sensor not detected")
 
-    device = matches[0]
-    with open(device + "/w1_slave") as f:
-        lines = f.readlines()
+    device_file = matches[0] + "/w1_slave"
 
-    if len(lines) < 2 or "t=" not in lines[1]:
-        raise RuntimeError("Invalid DS18B20 sensor data")
+    for _ in range(5):
+        with open(device_file) as f:
+            lines = f.readlines()
 
-    return float(lines[1].split("t=")[1]) / 1000.0
+        if len(lines) >= 2 and lines[0].strip().endswith("YES") and "t=" in lines[1]:
+            return float(lines[1].split("t=")[1]) / 1000.0
+
+        time.sleep(0.2)
+
+    raise RuntimeError("Invalid DS18B20 sensor data")
 
 
 def apply_normal_state() -> None:
-    green_led.on()
-    blue_led.off()
-    red_led.off()
-    buzzer.off()
-    relay.off()
-
-
-def apply_advisory_state() -> None:
-    # Keep UI appearance stable: use green as non-fault safe band
     green_led.on()
     blue_led.off()
     red_led.off()
@@ -89,14 +82,6 @@ def apply_failure_state() -> None:
     relay.off()
 
 
-def latch_failure(reason: str) -> None:
-    global failure_latched, failure_reason, overheat_start_time
-    failure_latched = True
-    failure_reason = reason
-    overheat_start_time = None
-    apply_failure_state()
-
-
 @app.get("/")
 def root():
     return {"message": "Thermal Control Backend Running"}
@@ -104,91 +89,73 @@ def root():
 
 @app.get("/state")
 def get_state():
-    global overheat_start_time, failure_latched, failure_reason
+    global overheat_start_time, sensor_fault_count
 
     now = time.time()
 
     try:
         temp = read_temp()
+        sensor_fault_count = 0
         sensor_ok = True
     except Exception:
         temp = None
         sensor_ok = False
+        sensor_fault_count += 1
 
-    # Sensor failure has highest priority
+    failure_active = False
+    failure_mode = "NONE"
+    mode = "NORMAL"
+    time_above_setpoint = 0.0
+
     if not sensor_ok:
-        latch_failure("SENSOR_FAILURE")
-
-    # If already latched, stay failed until manual reset
-    elif failure_latched:
-        apply_failure_state()
+        if sensor_fault_count >= SENSOR_FAULT_LIMIT:
+            apply_failure_state()
+            failure_active = True
+            failure_mode = "SENSOR_FAILURE"
+            mode = "FAILURE"
+        else:
+            apply_normal_state()
+        overheat_start_time = None
 
     else:
-        # Immediate hard trip
-        if temp >= EMERGENCY_TRIP:
-            latch_failure("EMERGENCY_OVERTEMP")
-
-        # Cooling / timed trip band
-        elif temp > COOLING_HIGH:
-            apply_cooling_state()
-
+        # STATE 1: Above 60 -> blue + pump immediately
+        if temp > COOLING_HIGH:
             if overheat_start_time is None:
                 overheat_start_time = now
-            elif now - overheat_start_time >= OVERHEAT_DELAY:
-                latch_failure("CRITICAL_OVERHEAT")
 
-        # Recovery band: below 60 but still above 58
-        elif temp >= RECOVERY_LOW:
+            time_above_setpoint = round(now - overheat_start_time, 2)
+
+            # After 20 continuous seconds above 60 -> failure
+            if time_above_setpoint >= OVERHEAT_DELAY:
+                apply_failure_state()
+                failure_active = True
+                failure_mode = "CRITICAL_OVERHEAT"
+                mode = "FAILURE"
+            else:
+                apply_cooling_state()
+                mode = "COOLING"
+
+        # STATE 2: Below 60 but still >= 58 -> red/screen OFF, blue ON
+        elif temp >= NORMAL_LOW:
             overheat_start_time = None
             apply_cooling_state()
-            failure_reason = "NONE"
+            mode = "RECOVERY"
 
-        # Advisory band: 55 to below 58
-        elif temp >= ADVISORY_LOW:
-            overheat_start_time = None
-            apply_advisory_state()
-            failure_reason = "NONE"
-
-        # Normal band: below 55
+        # STATE 3: Below 58 -> blue OFF, green ON only
         else:
             overheat_start_time = None
             apply_normal_state()
-            failure_reason = "NONE"
+            mode = "NORMAL"
 
-    # Store history internally, no frontend change required
-    if temp is not None:
         temperature_history.append({
             "timestamp": round(now, 2),
             "temperature": round(temp, 3)
         })
 
-    time_above_setpoint = 0.0
-    if (
-        overheat_start_time is not None
-        and not failure_latched
-        and temp is not None
-        and temp > COOLING_HIGH
-    ):
-        time_above_setpoint = round(now - overheat_start_time, 2)
-
-    # Preserve frontend-compatible fields
-    if failure_latched:
-        mode = "FAILURE"
-    elif temp is None:
-        mode = "FAILURE"
-    elif temp > COOLING_HIGH:
-        mode = "COOLING"
-    elif temp >= RECOVERY_LOW:
-        mode = "RECOVERY"
-    elif temp >= ADVISORY_LOW:
-        mode = "NORMAL"
-    else:
-        mode = "NORMAL"
-
     return {
         "current_temperature": temp if temp is not None else -1.0,
         "setpoint": COOLING_HIGH,
-        "trip_status": failure_latched,
+        "trip_status": failure_active,
         "heater_on": False,
         "pump_on": bool(relay.value),
         "relay_on": bool(relay.value),
@@ -198,19 +165,18 @@ def get_state():
         "led_fault": red_led.is_lit,
         "led_ok": green_led.is_lit,
         "mode": mode,
-        "failure_mode": failure_reason,
-        "screen_of_death": failure_latched,
+        "failure_mode": failure_mode,
+        "screen_of_death": failure_active,
         "time_above_setpoint": time_above_setpoint
     }
 
 
 @app.post("/reset")
 def reset_trip():
-    global overheat_start_time, failure_latched, failure_reason
+    global overheat_start_time, sensor_fault_count
 
     overheat_start_time = None
-    failure_latched = False
-    failure_reason = "NONE"
+    sensor_fault_count = 0
     apply_normal_state()
 
     return {"message": "System reset completed"}
@@ -218,5 +184,4 @@ def reset_trip():
 
 @app.get("/history")
 def get_history():
-    # Optional backend-only endpoint for future use
     return {"history": list(temperature_history)}
